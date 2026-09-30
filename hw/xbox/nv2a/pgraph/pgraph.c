@@ -31,6 +31,7 @@
 #include "swizzle.h"
 #include "nv2a_vsh_emulator.h"
 #include "seed.h"
+#include "hud_diag.h"
 
 #define PG_GET_MASK(reg, mask) GET_MASK(pgraph_reg_r(pg, reg), mask)
 #define PG_SET_MASK(reg, mask, value)        \
@@ -1073,6 +1074,7 @@ DEF_METHOD(NV097, FLIP_STALL)
         flip_logged = 1;
     }
     trace_nv2a_pgraph_flip_stall();
+    pgraph_hud_diag_flip(d);
     d->pgraph.renderer->ops.surface_update(d, false, true, true);
     d->pgraph.renderer->ops.flip_stall(d);
 
@@ -2740,6 +2742,7 @@ DEF_METHOD(NV097, SET_BEGIN_END)
             return;
         }
         nv2a_profile_inc_counter(NV2A_PROF_BEGIN_ENDS);
+        pgraph_hud_diag_draw(d);
         d->pgraph.renderer->ops.draw_end(d);
         pgraph_reset_inline_buffers(pg);
         pg->primitive_mode = PRIM_TYPE_INVALID;
@@ -2924,6 +2927,7 @@ static void pgraph_expand_draw_arrays(NV2AState *d)
      * triggered if a set of BEGIN+DA+END triplets is followed by the
      * BEGIN+DA+ARRAY_ELEMENT+... chain that caused this expansion. */
     if (pg->draw_arrays_length > 1) {
+        pgraph_hud_diag_draw(d);
         d->pgraph.renderer->ops.flush_draw(d);
         pgraph_reset_inline_buffers(pg);
     }
@@ -3173,7 +3177,9 @@ DEF_METHOD(NV097, SET_COLOR_CLEAR_VALUE)
 
 DEF_METHOD(NV097, CLEAR_SURFACE)
 {
-    d->pgraph.renderer->ops.clear_surface(d, parameter);
+    if (!pgraph_hud_ws_clear(d, parameter)) {
+        d->pgraph.renderer->ops.clear_surface(d, parameter);
+    }
 }
 
 DEF_METHOD(NV097, SET_CLEAR_RECT_HORIZONTAL)

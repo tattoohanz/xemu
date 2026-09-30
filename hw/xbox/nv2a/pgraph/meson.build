@@ -1,5 +1,6 @@
 specific_ss.add(files(
 	'cost.c',
+	'hud_diag.c',
 	'pgraph.c',
 	'profile.c',
 	'rdi.c',
