@@ -211,6 +211,7 @@ static void chihiro_patch_wm2_gemballa(void);
 static void chihiro_patch_wm2_blackbird(void);
 static void chihiro_patch_wm2_blackbird_rival(void);
 static void chihiro_patch_wm1(void);
+static void chihiro_patch_wm2_special(void);
 static bool chihiro_mbcom_bootstrap_done; /* Reset on QuickReboot so game gets fresh DIMM_SIZE */
 static bool chihiro_e1_armed; /* Reset on QuickReboot to prevent premature response delivery */
 char chihiro_game_filename[64]; /* set by chihiro_set_game_executable */
@@ -666,6 +667,7 @@ void chihiro_on_ohci_bus_start(void)
             chihiro_patch_wm2_blackbird();
             chihiro_patch_wm2_blackbird_rival();
             chihiro_patch_wm1();
+            chihiro_patch_wm2_special();
         }
         if (game_mode_bus_starts >= 2) {
             fprintf(stderr, "[%07lld] QUICKREBOOT (BUS START #%d in game mode)\n",
@@ -2772,7 +2774,8 @@ static void chihiro_patch_wm2_blackbird_rival(void)
  *                              Data/Car/964/BlackBird2, car 12, not the Z33.
  *   XEMU_WM1_BLACKBIRD_RIVAL=1 rival table at 0x20D4E8 (0x14 per entry: key,
  *                              car, ...): Blackbird1/2 (keys 6, 7, 8) car 6
- *                              (Z33) back to 12 (964).
+ *                              (Z33) back to 12 (964), and the special car
+ *                              id list at 0xD9EA1 (meter and the rest).
  * Both Blackbird groups need Data/Car/964/BlackBird1 and BlackBird2, which
  * the export image does not have. */
 typedef struct {
@@ -2897,10 +2900,22 @@ static const uint8_t wm1_bb7_e[] = { 7, 0, 0, 0, 0x06, 0, 0, 0, 0x0A, 0, 0, 0 };
 static const uint8_t wm1_bb7_r[] = { 7, 0, 0, 0, 0x0C, 0, 0, 0, 0x0A, 0, 0, 0 };
 static const uint8_t wm1_bb8_e[] = { 8, 0, 0, 0, 0x06, 0, 0, 0, 0x0A, 0, 0, 0 };
 static const uint8_t wm1_bb8_r[] = { 8, 0, 0, 0, 0x0C, 0, 0, 0, 0x0A, 0, 0, 0 };
+/* special car time attack: the car ids of the three special cars, built on
+ * the stack (Reina 0x0A, Akio 7, Blackbird 6 -> 12); the chosen one decides
+ * the car the race treats the player as (meter, ...) */
+static const uint8_t wm1_spc_e[] = {
+    0xC7, 0x44, 0x24, 0x10, 0x0A, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24, 0x14,
+    0x07, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24, 0x18, 0x06, 0x00, 0x00, 0x00
+};
+static const uint8_t wm1_spc_r[] = {
+    0xC7, 0x44, 0x24, 0x10, 0x0A, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24, 0x14,
+    0x07, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24, 0x18, 0x0C, 0x00, 0x00, 0x00
+};
 static const ChihiroBytePatch wm1_blackbird_rival[] = {
     { 0x0020D54Cu, wm1_bb6_e, wm1_bb6_r, sizeof(wm1_bb6_e) },
     { 0x0020D560u, wm1_bb7_e, wm1_bb7_r, sizeof(wm1_bb7_e) },
     { 0x0020D574u, wm1_bb8_e, wm1_bb8_r, sizeof(wm1_bb8_e) },
+    { 0x000D9EA1u, wm1_spc_e, wm1_spc_r, sizeof(wm1_spc_e) },
 };
 
 static void chihiro_patch_wm1(void)
@@ -2919,8 +2934,34 @@ static void chihiro_patch_wm1(void)
                         2, wm1_blackbird_rival,
                         ARRAY_SIZE(wm1_blackbird_rival),
                         "WM1 BLACKBIRD RIVAL",
-                        "Blackbird races the 964 (rival keys 6-8, car 6 -> "
-                        "12)");
+                        "Blackbird races the 964 (rival keys 6-8 and the "
+                        "special car id, car 6 -> 12)");
+}
+
+/* Maximum Tune 2 special car time attack: the car ids of the three special
+ * cars are built on the stack at 0x13E636 (Reina 0x0D, Akio 0x10, Blackbird
+ * 0x0E in the export build, 1 in the JPN one). The chosen id goes to
+ * 0x31A800, which the race uses as the player's car (meter and the rest)
+ * while the model and power come from the stage record. Same opt-in as the
+ * stage records: XEMU_WM2_BLACKBIRD_RIVAL=1. */
+static const uint8_t wm2_spc_e[] = {
+    0xC7, 0x44, 0x24, 0x14, 0x0D, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24, 0x18,
+    0x10, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24, 0x1C, 0x0E, 0x00, 0x00, 0x00
+};
+static const uint8_t wm2_spc_r[] = {
+    0xC7, 0x44, 0x24, 0x14, 0x0D, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24, 0x18,
+    0x10, 0x00, 0x00, 0x00, 0xC7, 0x44, 0x24, 0x1C, 0x01, 0x00, 0x00, 0x00
+};
+static const ChihiroBytePatch wm2_special[] = {
+    { 0x0013E636u, wm2_spc_e, wm2_spc_r, sizeof(wm2_spc_e) },
+};
+
+static void chihiro_patch_wm2_special(void)
+{
+    chihiro_patch_group("XEMU_WM2_BLACKBIRD_RIVAL", "V322.xbe", WM2_REGION_VA,
+                        2, wm2_special, ARRAY_SIZE(wm2_special),
+                        "WM2 BLACKBIRD SPECIAL",
+                        "special car Blackbird is car 1, the 38RS (0013E64A)");
 }
 
 /* The mov that carries the slot table, then the fourteen bytes behind it and
