@@ -208,6 +208,7 @@ bool chihiro_game_running;  /* the game has taken over: no SEGABOOT DMA scan */
 static int game_mode_bus_starts;  /* BUS START count since game_running became true */
 static void chihiro_patch_running_game(void);
 static void chihiro_patch_wm2_gemballa(void);
+static void chihiro_patch_wm2_blackbird(void);
 static bool chihiro_mbcom_bootstrap_done; /* Reset on QuickReboot so game gets fresh DIMM_SIZE */
 static bool chihiro_e1_armed; /* Reset on QuickReboot to prevent premature response delivery */
 char chihiro_game_filename[64]; /* set by chihiro_set_game_executable */
@@ -660,6 +661,7 @@ void chihiro_on_ohci_bus_start(void)
         if (game_mode_bus_starts == 1) {
             chihiro_patch_running_game();
             chihiro_patch_wm2_gemballa();
+            chihiro_patch_wm2_blackbird();
         }
         if (game_mode_bus_starts >= 2) {
             fprintf(stderr, "[%07lld] QUICKREBOOT (BUS START #%d in game mode)\n",
@@ -2584,6 +2586,86 @@ static void chihiro_patch_wm2_gemballa(void)
                          sizeof(ret), true)) {
         fprintf(stderr, "Chihiro: HACK, V322.xbe GEMBALLA maker select "
                 "unlocked at 0013529E and 00159D27\n");
+    }
+}
+
+/* HACK, opt-in with XEMU_WM2_BLACKBIRD=1: the same export V322.xbe gives
+ * Blackbird the Z33 instead of the GEMBALLA 3.8RS in the one scene that
+ * loads her car by name next to Akio's S30 and Reina's BNR32: 0x1591C0
+ * (state 20 of the scene table at 0x2838A0: Data/Car/Z33/Blackbird, car 14,
+ * or Data/Car/38RS/Blackbird, car 1) and 0x1593D0 (its body, textures and
+ * wheels). Both branch on the region word like the maker select; both jne
+ * become jmp, the path the JPN build always takes. In memory only, both
+ * sites or neither, export build only. The 38RS/Blackbird files are in the
+ * export image already. */
+static const uint8_t wm2_bb_scene_expect[] = {
+    0x83, 0xF8, 0x02, 0xA1, 0x20, 0xEA, 0x38, 0x00, 0x52, 0x50,
+    0x75, 0x30, 0xE8, 0xD9, 0x7F, 0xF0, 0xFF
+};
+static const uint8_t wm2_bb_scene_replace[] = {
+    0x83, 0xF8, 0x02, 0xA1, 0x20, 0xEA, 0x38, 0x00, 0x52, 0x50,
+    0xEB, 0x30, 0xE8, 0xD9, 0x7F, 0xF0, 0xFF
+};
+static const uint8_t wm2_bb_files_expect[] = {
+    0x83, 0xF8, 0x02, 0x89, 0x35, 0x8C, 0xE9, 0x38, 0x00, 0x68, 0x40,
+    0xEB, 0x38, 0x00, 0x75, 0x35, 0x68, 0x1C, 0x59, 0x22, 0x00
+};
+static const uint8_t wm2_bb_files_replace[] = {
+    0x83, 0xF8, 0x02, 0x89, 0x35, 0x8C, 0xE9, 0x38, 0x00, 0x68, 0x40,
+    0xEB, 0x38, 0x00, 0xEB, 0x35, 0x68, 0x1C, 0x59, 0x22, 0x00
+};
+#define WM2_BB_SCENE_VA 0x001592F6u   /* jne at 0x159300 */
+#define WM2_BB_FILES_VA 0x00159483u   /* jne at 0x159491 */
+
+static void chihiro_patch_wm2_blackbird(void)
+{
+    const char *env = getenv("XEMU_WM2_BLACKBIRD");
+    const char *base = chihiro_game_filename;
+    uint8_t scene[sizeof(wm2_bb_scene_expect)];
+    uint8_t files[sizeof(wm2_bb_files_expect)];
+    uint8_t reg[4];
+    uint32_t region;
+
+    if (!env || strcmp(env, "1") != 0) {
+        return;
+    }
+    for (const char *p = chihiro_game_filename; *p; p++) {
+        if (*p == '\\' || *p == '/') {
+            base = p + 1;
+        }
+    }
+    if (g_ascii_strcasecmp(base, "V322.xbe") != 0) {
+        return;
+    }
+    if (!chihiro_guest_rw(WM2_REGION_VA, reg, sizeof(reg), false) ||
+        !chihiro_guest_rw(WM2_BB_SCENE_VA, scene, sizeof(scene), false) ||
+        !chihiro_guest_rw(WM2_BB_FILES_VA, files, sizeof(files), false)) {
+        fprintf(stderr, "Chihiro: WM2 BLACKBIRD: V322.xbe is not mapped yet, "
+                "skipped\n");
+        return;
+    }
+    region = ldl_le_p(reg);
+    if (region != 2) {
+        fprintf(stderr, "Chihiro: WM2 BLACKBIRD: region word %u, not the "
+                "export build, left alone\n", region);
+        return;
+    }
+    if (memcmp(scene, wm2_bb_scene_replace, sizeof(scene)) == 0 &&
+        memcmp(files, wm2_bb_files_replace, sizeof(files)) == 0) {
+        return;                             /* already there */
+    }
+    if (memcmp(scene, wm2_bb_scene_expect, sizeof(scene)) != 0 ||
+        memcmp(files, wm2_bb_files_expect, sizeof(files)) != 0) {
+        fprintf(stderr, "Chihiro: WM2 BLACKBIRD: V322.xbe is not the revision "
+                "the patch knows, left alone\n");
+        return;
+    }
+    if (chihiro_guest_rw(WM2_BB_SCENE_VA, (void *)wm2_bb_scene_replace,
+                         sizeof(scene), true) &&
+        chihiro_guest_rw(WM2_BB_FILES_VA, (void *)wm2_bb_files_replace,
+                         sizeof(files), true)) {
+        fprintf(stderr, "Chihiro: HACK, V322.xbe Blackbird drives the 38RS "
+                "(00159300 and 00159491)\n");
     }
 }
 
