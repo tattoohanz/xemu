@@ -209,6 +209,7 @@ static int game_mode_bus_starts;  /* BUS START count since game_running became t
 static void chihiro_patch_running_game(void);
 static void chihiro_patch_wm2_gemballa(void);
 static void chihiro_patch_wm2_blackbird(void);
+static void chihiro_patch_wm2_blackbird_rival(void);
 static bool chihiro_mbcom_bootstrap_done; /* Reset on QuickReboot so game gets fresh DIMM_SIZE */
 static bool chihiro_e1_armed; /* Reset on QuickReboot to prevent premature response delivery */
 char chihiro_game_filename[64]; /* set by chihiro_set_game_executable */
@@ -662,6 +663,7 @@ void chihiro_on_ohci_bus_start(void)
             chihiro_patch_running_game();
             chihiro_patch_wm2_gemballa();
             chihiro_patch_wm2_blackbird();
+            chihiro_patch_wm2_blackbird_rival();
         }
         if (game_mode_bus_starts >= 2) {
             fprintf(stderr, "[%07lld] QUICKREBOOT (BUS START #%d in game mode)\n",
@@ -2667,6 +2669,94 @@ static void chihiro_patch_wm2_blackbird(void)
         fprintf(stderr, "Chihiro: HACK, V322.xbe Blackbird drives the 38RS "
                 "(00159300 and 00159491)\n");
     }
+}
+
+/* HACK, opt-in with XEMU_WM2_BLACKBIRD_RIVAL=1: where Blackbird races in the
+ * export V322.xbe (story and the other stage-driven modes) her car comes from
+ * data, not code. The stage table at 0x269AE0 (0x1C per record: key, rival
+ * index, ...) picks a rival from the table at 0x269290 (0x38 per entry, car id
+ * first). Entry 6 is car 1, the 38RS, owner folder BlackBird; entry 0x20 is
+ * car 14, the Z33, same folder. Both builds carry both entries; the export
+ * build points 16 records (keys 0x21-0x2F and 0x95) at 0x20 where the JPN
+ * build points them at 6. The index goes back to 6, in memory only, all 16
+ * or none, export build only. */
+static const struct {
+    uint32_t va;       /* rival index of the record; its key is 4 bytes before */
+    uint32_t key;
+} wm2_bb_rival_recs[] = {
+    { 0x00269E64u, 0x21 }, { 0x00269E80u, 0x22 }, { 0x00269E9Cu, 0x23 },
+    { 0x00269EB8u, 0x24 }, { 0x00269ED4u, 0x25 }, { 0x00269EF0u, 0x26 },
+    { 0x00269F0Cu, 0x27 }, { 0x00269F28u, 0x28 }, { 0x00269F44u, 0x29 },
+    { 0x00269F60u, 0x2A }, { 0x00269F7Cu, 0x2B }, { 0x00269F98u, 0x2C },
+    { 0x00269FB4u, 0x2D }, { 0x00269FD0u, 0x2E }, { 0x00269FECu, 0x2F },
+    { 0x0026AB14u, 0x95 },
+};
+#define WM2_BB_RIVAL_Z33   0x20u
+#define WM2_BB_RIVAL_38RS  0x06u
+
+static void chihiro_patch_wm2_blackbird_rival(void)
+{
+    const char *env = getenv("XEMU_WM2_BLACKBIRD_RIVAL");
+    const char *base = chihiro_game_filename;
+    const size_t n = ARRAY_SIZE(wm2_bb_rival_recs);
+    uint8_t reg[4], rec[8];
+    uint32_t region;
+    size_t done = 0;
+
+    if (!env || strcmp(env, "1") != 0) {
+        return;
+    }
+    for (const char *p = chihiro_game_filename; *p; p++) {
+        if (*p == '\\' || *p == '/') {
+            base = p + 1;
+        }
+    }
+    if (g_ascii_strcasecmp(base, "V322.xbe") != 0) {
+        return;
+    }
+    if (!chihiro_guest_rw(WM2_REGION_VA, reg, sizeof(reg), false)) {
+        fprintf(stderr, "Chihiro: WM2 BLACKBIRD RIVAL: V322.xbe is not "
+                "mapped yet, skipped\n");
+        return;
+    }
+    region = ldl_le_p(reg);
+    if (region != 2) {
+        fprintf(stderr, "Chihiro: WM2 BLACKBIRD RIVAL: region word %u, not "
+                "the export build, left alone\n", region);
+        return;
+    }
+    /* every record checked before any is written */
+    for (size_t i = 0; i < n; i++) {
+        if (!chihiro_guest_rw(wm2_bb_rival_recs[i].va - 4, rec, sizeof(rec),
+                              false)) {
+            fprintf(stderr, "Chihiro: WM2 BLACKBIRD RIVAL: stage table not "
+                    "mapped yet, skipped\n");
+            return;
+        }
+        uint32_t key = ldl_le_p(rec), idx = ldl_le_p(rec + 4);
+        if (key != wm2_bb_rival_recs[i].key ||
+            (idx != WM2_BB_RIVAL_Z33 && idx != WM2_BB_RIVAL_38RS)) {
+            fprintf(stderr, "Chihiro: WM2 BLACKBIRD RIVAL: record %08X is "
+                    "key %#x index %#x, not the revision the patch knows, "
+                    "left alone\n", wm2_bb_rival_recs[i].va, key, idx);
+            return;
+        }
+        done += idx == WM2_BB_RIVAL_38RS;
+    }
+    if (done == n) {
+        return;                             /* already there */
+    }
+    for (size_t i = 0; i < n; i++) {
+        uint8_t v[4] = { WM2_BB_RIVAL_38RS, 0, 0, 0 };
+        if (!chihiro_guest_rw(wm2_bb_rival_recs[i].va, v, sizeof(v), true)) {
+            fprintf(stderr, "Chihiro: WM2 BLACKBIRD RIVAL: write at %08X "
+                    "failed after %zu of %zu\n", wm2_bb_rival_recs[i].va,
+                    i, n);
+            return;
+        }
+    }
+    fprintf(stderr, "Chihiro: HACK, V322.xbe Blackbird races the 38RS "
+            "(%zu stage records, rival 0x20 -> 0x06)\n", n);
 }
 
 /* The mov that carries the slot table, then the fourteen bytes behind it and
