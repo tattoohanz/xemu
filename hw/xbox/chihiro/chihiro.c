@@ -210,6 +210,7 @@ static void chihiro_patch_running_game(void);
 static void chihiro_patch_wm2_gemballa(void);
 static void chihiro_patch_wm2_blackbird(void);
 static void chihiro_patch_wm2_blackbird_rival(void);
+static void chihiro_patch_wm1(void);
 static bool chihiro_mbcom_bootstrap_done; /* Reset on QuickReboot so game gets fresh DIMM_SIZE */
 static bool chihiro_e1_armed; /* Reset on QuickReboot to prevent premature response delivery */
 char chihiro_game_filename[64]; /* set by chihiro_set_game_executable */
@@ -664,6 +665,7 @@ void chihiro_on_ohci_bus_start(void)
             chihiro_patch_wm2_gemballa();
             chihiro_patch_wm2_blackbird();
             chihiro_patch_wm2_blackbird_rival();
+            chihiro_patch_wm1();
         }
         if (game_mode_bus_starts >= 2) {
             fprintf(stderr, "[%07lld] QUICKREBOOT (BUS START #%d in game mode)\n",
@@ -2757,6 +2759,168 @@ static void chihiro_patch_wm2_blackbird_rival(void)
     }
     fprintf(stderr, "Chihiro: HACK, V322.xbe Blackbird races the 38RS "
             "(%zu stage records, rival 0x20 -> 0x06)\n", n);
+}
+
+/* Maximum Tune 1 EXPORT (V307.xbe) carries the same three substitutions as
+ * Maximum Tune 2, at its own addresses (region word 0x210688: 2 export,
+ * 1 JPN). Each group is opt-in with its own variable, all of its sites or
+ * none, export build only, in memory only:
+ *   XEMU_WM1_GEMBALLA=1        maker select (0xD35D2) and the way back
+ *                              (0xE0567): 6 makers, maker = cursor. Needs the
+ *                              JPN Data/2D_Usa/Menu/maker_001.png.
+ *   XEMU_WM1_BLACKBIRD=1       the special car scene (0xDFFDC, 0xE01F1):
+ *                              Data/Car/964/BlackBird2, car 12, not the Z33.
+ *   XEMU_WM1_BLACKBIRD_RIVAL=1 rival table at 0x20D4E8 (0x14 per entry: key,
+ *                              car, ...): Blackbird1/2 (keys 6, 7, 8) car 6
+ *                              (Z33) back to 12 (964).
+ * Both Blackbird groups need Data/Car/964/BlackBird1 and BlackBird2, which
+ * the export image does not have. */
+typedef struct {
+    uint32_t       va;
+    const uint8_t *expect;
+    const uint8_t *replace;
+    uint32_t       len;
+} ChihiroBytePatch;
+
+static void chihiro_patch_group(const char *env_name, const char *xbe,
+                                uint32_t region_va, uint32_t region_want,
+                                const ChihiroBytePatch *p, size_t n,
+                                const char *tag, const char *done)
+{
+    const char *env = getenv(env_name);
+    const char *base = chihiro_game_filename;
+    uint8_t have[32], reg[4];
+    size_t replaced = 0;
+
+    if (!env || strcmp(env, "1") != 0) {
+        return;
+    }
+    for (const char *c = chihiro_game_filename; *c; c++) {
+        if (*c == '\\' || *c == '/') {
+            base = c + 1;
+        }
+    }
+    if (g_ascii_strcasecmp(base, xbe) != 0) {
+        return;
+    }
+    if (!chihiro_guest_rw(region_va, reg, sizeof(reg), false)) {
+        fprintf(stderr, "Chihiro: %s: %s is not mapped yet, skipped\n",
+                tag, xbe);
+        return;
+    }
+    if (ldl_le_p(reg) != region_want) {
+        fprintf(stderr, "Chihiro: %s: region word %u, not the export build, "
+                "left alone\n", tag, ldl_le_p(reg));
+        return;
+    }
+    /* every site checked before any is written */
+    for (size_t i = 0; i < n; i++) {
+        if (p[i].len > sizeof(have) ||
+            !chihiro_guest_rw(p[i].va, have, p[i].len, false)) {
+            fprintf(stderr, "Chihiro: %s: %08X is not mapped yet, skipped\n",
+                    tag, p[i].va);
+            return;
+        }
+        if (memcmp(have, p[i].replace, p[i].len) == 0) {
+            replaced++;
+        } else if (memcmp(have, p[i].expect, p[i].len) != 0) {
+            fprintf(stderr, "Chihiro: %s: %s at %08X is not the revision the "
+                    "patch knows, left alone\n", tag, xbe, p[i].va);
+            return;
+        }
+    }
+    if (replaced == n) {
+        return;                             /* already there */
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (!chihiro_guest_rw(p[i].va, (void *)p[i].replace, p[i].len, true)) {
+            fprintf(stderr, "Chihiro: %s: write at %08X failed after %zu of "
+                    "%zu\n", tag, p[i].va, i, n);
+            return;
+        }
+    }
+    fprintf(stderr, "Chihiro: HACK, %s %s\n", xbe, done);
+}
+
+#define WM1_REGION_VA 0x00210688u
+
+/* maker select: mov [esp+40],eax / mov [esp+20],eax / jne / mov edx,[..] */
+static const uint8_t wm1_sel_e[] = {
+    0x89, 0x44, 0x24, 0x40, 0x89, 0x44, 0x24, 0x20, 0x0F, 0x85, 0x85, 0x00,
+    0x00, 0x00, 0x8B, 0x15, 0x94, 0x09, 0x27, 0x00
+};
+static const uint8_t wm1_sel_r[] = {
+    0x89, 0x44, 0x24, 0x40, 0x89, 0x44, 0x24, 0x20, 0xE9, 0x86, 0x00, 0x00,
+    0x00, 0x90, 0x8B, 0x15, 0x94, 0x09, 0x27, 0x00
+};
+/* way back: cmp [region],2 / jne / mov eax,[maker] / dec eax */
+static const uint8_t wm1_ret_e[] = {
+    0x83, 0x3D, 0x88, 0x06, 0x21, 0x00, 0x02, 0x75, 0x0D, 0xA1, 0x38, 0x09,
+    0x27, 0x00, 0x48
+};
+static const uint8_t wm1_ret_r[] = {
+    0x83, 0x3D, 0x88, 0x06, 0x21, 0x00, 0x02, 0xEB, 0x0D, 0xA1, 0x38, 0x09,
+    0x27, 0x00, 0x48
+};
+static const ChihiroBytePatch wm1_gemballa[] = {
+    { 0x000D35CAu, wm1_sel_e, wm1_sel_r, sizeof(wm1_sel_e) },  /* jne D35D2 */
+    { 0x000E0560u, wm1_ret_e, wm1_ret_r, sizeof(wm1_ret_e) },  /* jne E0567 */
+};
+
+/* scene: mov eax,[region] / add esp,4 / cmp eax,2 / jne (rel32) / mov eax */
+static const uint8_t wm1_scn_e[] = {
+    0xA1, 0x88, 0x06, 0x21, 0x00, 0x83, 0xC4, 0x04, 0x83, 0xF8, 0x02, 0x0F,
+    0x85, 0x99, 0x00, 0x00, 0x00, 0xA1, 0x78, 0x1D, 0x27, 0x00
+};
+static const uint8_t wm1_scn_r[] = {
+    0xA1, 0x88, 0x06, 0x21, 0x00, 0x83, 0xC4, 0x04, 0x83, 0xF8, 0x02, 0xE9,
+    0x9A, 0x00, 0x00, 0x00, 0x90, 0xA1, 0x78, 0x1D, 0x27, 0x00
+};
+/* scene files: cmp eax,2 / mov [..],esi / push / jne / push Z33_body */
+static const uint8_t wm1_fil_e[] = {
+    0x83, 0xF8, 0x02, 0x89, 0x35, 0x14, 0x1C, 0x27, 0x00, 0x68, 0x20, 0x1D,
+    0x27, 0x00, 0x75, 0x35, 0x68, 0x58, 0x16, 0x1C, 0x00
+};
+static const uint8_t wm1_fil_r[] = {
+    0x83, 0xF8, 0x02, 0x89, 0x35, 0x14, 0x1C, 0x27, 0x00, 0x68, 0x20, 0x1D,
+    0x27, 0x00, 0xEB, 0x35, 0x68, 0x58, 0x16, 0x1C, 0x00
+};
+static const ChihiroBytePatch wm1_blackbird[] = {
+    { 0x000DFFD1u, wm1_scn_e, wm1_scn_r, sizeof(wm1_scn_e) },  /* jne DFFDC */
+    { 0x000E01E3u, wm1_fil_e, wm1_fil_r, sizeof(wm1_fil_e) },  /* jne E01F1 */
+};
+
+/* rival entries: key, car, 0x0A */
+static const uint8_t wm1_bb6_e[] = { 6, 0, 0, 0, 0x06, 0, 0, 0, 0x0A, 0, 0, 0 };
+static const uint8_t wm1_bb6_r[] = { 6, 0, 0, 0, 0x0C, 0, 0, 0, 0x0A, 0, 0, 0 };
+static const uint8_t wm1_bb7_e[] = { 7, 0, 0, 0, 0x06, 0, 0, 0, 0x0A, 0, 0, 0 };
+static const uint8_t wm1_bb7_r[] = { 7, 0, 0, 0, 0x0C, 0, 0, 0, 0x0A, 0, 0, 0 };
+static const uint8_t wm1_bb8_e[] = { 8, 0, 0, 0, 0x06, 0, 0, 0, 0x0A, 0, 0, 0 };
+static const uint8_t wm1_bb8_r[] = { 8, 0, 0, 0, 0x0C, 0, 0, 0, 0x0A, 0, 0, 0 };
+static const ChihiroBytePatch wm1_blackbird_rival[] = {
+    { 0x0020D54Cu, wm1_bb6_e, wm1_bb6_r, sizeof(wm1_bb6_e) },
+    { 0x0020D560u, wm1_bb7_e, wm1_bb7_r, sizeof(wm1_bb7_e) },
+    { 0x0020D574u, wm1_bb8_e, wm1_bb8_r, sizeof(wm1_bb8_e) },
+};
+
+static void chihiro_patch_wm1(void)
+{
+    chihiro_patch_group("XEMU_WM1_GEMBALLA", "V307.xbe", WM1_REGION_VA, 2,
+                        wm1_gemballa, ARRAY_SIZE(wm1_gemballa),
+                        "WM1 GEMBALLA",
+                        "GEMBALLA maker select unlocked at 000D35D2 and "
+                        "000E0567");
+    chihiro_patch_group("XEMU_WM1_BLACKBIRD", "V307.xbe", WM1_REGION_VA, 2,
+                        wm1_blackbird, ARRAY_SIZE(wm1_blackbird),
+                        "WM1 BLACKBIRD",
+                        "Blackbird scene uses the 964 (000DFFDC and "
+                        "000E01F1)");
+    chihiro_patch_group("XEMU_WM1_BLACKBIRD_RIVAL", "V307.xbe", WM1_REGION_VA,
+                        2, wm1_blackbird_rival,
+                        ARRAY_SIZE(wm1_blackbird_rival),
+                        "WM1 BLACKBIRD RIVAL",
+                        "Blackbird races the 964 (rival keys 6-8, car 6 -> "
+                        "12)");
 }
 
 /* The mov that carries the slot table, then the fourteen bytes behind it and
