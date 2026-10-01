@@ -207,6 +207,7 @@ static bool chihiro_active;
 bool chihiro_game_running;  /* the game has taken over: no SEGABOOT DMA scan */
 static int game_mode_bus_starts;  /* BUS START count since game_running became true */
 static void chihiro_patch_running_game(void);
+static void chihiro_patch_wm2_gemballa(void);
 static bool chihiro_mbcom_bootstrap_done; /* Reset on QuickReboot so game gets fresh DIMM_SIZE */
 static bool chihiro_e1_armed; /* Reset on QuickReboot to prevent premature response delivery */
 char chihiro_game_filename[64]; /* set by chihiro_set_game_executable */
@@ -658,6 +659,7 @@ void chihiro_on_ohci_bus_start(void)
         game_mode_bus_starts++;
         if (game_mode_bus_starts == 1) {
             chihiro_patch_running_game();
+            chihiro_patch_wm2_gemballa();
         }
         if (game_mode_bus_starts >= 2) {
             fprintf(stderr, "[%07lld] QUICKREBOOT (BUS START #%d in game mode)\n",
@@ -2500,6 +2502,88 @@ static void chihiro_patch_running_game(void)
             fprintf(stderr, "Chihiro: HACK, %s patched at %08X: %s\n",
                     gp->xbe, gp->va, gp->why);
         }
+    }
+}
+
+/* HACK, opt-in with XEMU_WM2_GEMBALLA=1: Maximum Tune 2 Ver.B EXPORT
+ * (V322.xbe) hides the GEMBALLA maker although the car data and the
+ * per-maker tables are the JPN ones. Two branches on the region word
+ * (0x2619B8: 2 export, 1 JPN) give 5 makers with maker = cursor + 1
+ * (0x13529E) and cursor = maker - 1 on the way back (0x159D27). Both jne
+ * become jmp, the path the JPN build always takes, in memory only like the
+ * patch above: the image, whose digests the kernel checks, is not touched.
+ * Both sites or neither, export build only. The maker strip then needs the
+ * JPN Data/2D_Usa/Menu/maker_001.png (GEMBALLA as tile 0). */
+static const uint8_t wm2_gem_sel_expect[] = {
+    0x89, 0x44, 0x24, 0x24, 0x0F, 0x85, 0x85, 0x00, 0x00, 0x00,
+    0x8B, 0x15, 0x5C, 0x37
+};
+static const uint8_t wm2_gem_sel_replace[] = {
+    0x89, 0x44, 0x24, 0x24, 0xE9, 0x86, 0x00, 0x00, 0x00, 0x90,
+    0x8B, 0x15, 0x5C, 0x37
+};
+static const uint8_t wm2_gem_ret_expect[] = {
+    0x83, 0x3D, 0xB8, 0x19, 0x26, 0x00, 0x02, 0x75, 0x0D,
+    0xA1, 0xA0, 0x36, 0x38
+};
+static const uint8_t wm2_gem_ret_replace[] = {
+    0x83, 0x3D, 0xB8, 0x19, 0x26, 0x00, 0x02, 0xEB, 0x0D,
+    0xA1, 0xA0, 0x36, 0x38
+};
+#define WM2_GEM_SEL_VA 0x0013529Au   /* jne at 0x13529E */
+#define WM2_GEM_RET_VA 0x00159D20u   /* jne at 0x159D27 */
+#define WM2_REGION_VA  0x002619B8u
+
+static void chihiro_patch_wm2_gemballa(void)
+{
+    const char *env = getenv("XEMU_WM2_GEMBALLA");
+    const char *base = chihiro_game_filename;
+    uint8_t sel[sizeof(wm2_gem_sel_expect)];
+    uint8_t ret[sizeof(wm2_gem_ret_expect)];
+    uint8_t reg[4];
+    uint32_t region;
+
+    if (!env || strcmp(env, "1") != 0) {
+        return;
+    }
+    /* The name carries the directory it was booted from ("A\\V322.xbe"). */
+    for (const char *p = chihiro_game_filename; *p; p++) {
+        if (*p == '\\' || *p == '/') {
+            base = p + 1;
+        }
+    }
+    if (g_ascii_strcasecmp(base, "V322.xbe") != 0) {
+        return;
+    }
+    if (!chihiro_guest_rw(WM2_REGION_VA, reg, sizeof(reg), false) ||
+        !chihiro_guest_rw(WM2_GEM_SEL_VA, sel, sizeof(sel), false) ||
+        !chihiro_guest_rw(WM2_GEM_RET_VA, ret, sizeof(ret), false)) {
+        fprintf(stderr, "Chihiro: WM2 GEMBALLA: V322.xbe is not mapped yet, "
+                "skipped\n");
+        return;
+    }
+    region = ldl_le_p(reg);
+    if (region != 2) {
+        fprintf(stderr, "Chihiro: WM2 GEMBALLA: region word %u, not the "
+                "export build, left alone\n", region);
+        return;
+    }
+    if (memcmp(sel, wm2_gem_sel_replace, sizeof(sel)) == 0 &&
+        memcmp(ret, wm2_gem_ret_replace, sizeof(ret)) == 0) {
+        return;                             /* already there */
+    }
+    if (memcmp(sel, wm2_gem_sel_expect, sizeof(sel)) != 0 ||
+        memcmp(ret, wm2_gem_ret_expect, sizeof(ret)) != 0) {
+        fprintf(stderr, "Chihiro: WM2 GEMBALLA: V322.xbe is not the revision "
+                "the patch knows, left alone\n");
+        return;
+    }
+    if (chihiro_guest_rw(WM2_GEM_SEL_VA, (void *)wm2_gem_sel_replace,
+                         sizeof(sel), true) &&
+        chihiro_guest_rw(WM2_GEM_RET_VA, (void *)wm2_gem_ret_replace,
+                         sizeof(ret), true)) {
+        fprintf(stderr, "Chihiro: HACK, V322.xbe GEMBALLA maker select "
+                "unlocked at 0013529E and 00159D27\n");
     }
 }
 
