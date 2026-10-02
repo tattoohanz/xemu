@@ -212,6 +212,7 @@ static void chihiro_patch_wm2_blackbird(void);
 static void chihiro_patch_wm2_blackbird_rival(void);
 static void chihiro_patch_wm1(void);
 static void chihiro_patch_wm2_special(void);
+static void chihiro_patch_wm2_kijima(void);
 static bool chihiro_mbcom_bootstrap_done; /* Reset on QuickReboot so game gets fresh DIMM_SIZE */
 static bool chihiro_e1_armed; /* Reset on QuickReboot to prevent premature response delivery */
 char chihiro_game_filename[64]; /* set by chihiro_set_game_executable */
@@ -668,6 +669,7 @@ void chihiro_on_ohci_bus_start(void)
             chihiro_patch_wm2_blackbird_rival();
             chihiro_patch_wm1();
             chihiro_patch_wm2_special();
+            chihiro_patch_wm2_kijima();
         }
         if (game_mode_bus_starts >= 2) {
             fprintf(stderr, "[%07lld] QUICKREBOOT (BUS START #%d in game mode)\n",
@@ -3160,6 +3162,29 @@ static void chihiro_patch_wm2_special(void)
                         2, wm2_special, ARRAY_SIZE(wm2_special),
                         "WM2 BLACKBIRD SPECIAL",
                         "special car Blackbird is car 1, the 38RS (0013E64A)");
+}
+
+/* HACK, opt-in with XEMU_WM2_KIJIMA=1: Maximum Tune 2 EXPORT puts Kijima in
+ * a red RX-8 for his two story stages; the JPN build gives him the yellow
+ * GEMBALLA 3.8RS. Stage table 0x269AE0, keys 0x57 (Kizima2) and 0x58
+ * (KizimaB): rival 0x23 (car 3 SE3P, Player/Red) back to 0x22 (car 1 38RS,
+ * Player/Yellow), as in the JPN build. Data only, both records or neither,
+ * export build only; the player's own RX-8 is not touched. */
+static const uint8_t wm2_kz57_e[] = { 0x57, 0, 0, 0, 0x23, 0, 0, 0, 0, 0, 0, 0 };
+static const uint8_t wm2_kz57_r[] = { 0x57, 0, 0, 0, 0x22, 0, 0, 0, 0, 0, 0, 0 };
+static const uint8_t wm2_kz58_e[] = { 0x58, 0, 0, 0, 0x23, 0, 0, 0, 0, 0, 0, 0 };
+static const uint8_t wm2_kz58_r[] = { 0x58, 0, 0, 0, 0x22, 0, 0, 0, 0, 0, 0, 0 };
+static const ChihiroBytePatch wm2_kijima[] = {
+    { 0x0026A448u, wm2_kz57_e, wm2_kz57_r, sizeof(wm2_kz57_e) },
+    { 0x0026A464u, wm2_kz58_e, wm2_kz58_r, sizeof(wm2_kz58_e) },
+};
+
+static void chihiro_patch_wm2_kijima(void)
+{
+    chihiro_patch_group("XEMU_WM2_KIJIMA", "V322.xbe", WM2_REGION_VA, 2,
+                        wm2_kijima, ARRAY_SIZE(wm2_kijima), "WM2 KIJIMA",
+                        "Kijima races the yellow 38RS (stage keys 0x57, 0x58, "
+                        "rival 0x23 -> 0x22)");
 }
 
 /* The mov that carries the slot table, then the fourteen bytes behind it and
