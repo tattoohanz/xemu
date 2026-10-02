@@ -2774,8 +2774,9 @@ static void chihiro_patch_wm2_blackbird_rival(void)
  *                              Data/Car/964/BlackBird2, car 12, not the Z33.
  *   XEMU_WM1_BLACKBIRD_RIVAL=1 rival table at 0x20D4E8 (0x14 per entry: key,
  *                              car, ...): Blackbird1/2 (keys 6, 7, 8) car 6
- *                              (Z33) back to 12 (964), and the special car
- *                              id list at 0xD9EA1 (meter and the rest).
+ *                              (Z33) back to 12 (964).
+ *   XEMU_WM1_BLACKBIRD_SPECIAL=1 the special car id list at 0xD9EA1, 6 -> 12
+ *                              (experimental, see below).
  * Both Blackbird groups need Data/Car/964/BlackBird1 and BlackBird2, which
  * the export image does not have. */
 typedef struct {
@@ -2915,6 +2916,12 @@ static const ChihiroBytePatch wm1_blackbird_rival[] = {
     { 0x0020D54Cu, wm1_bb6_e, wm1_bb6_r, sizeof(wm1_bb6_e) },
     { 0x0020D560u, wm1_bb7_e, wm1_bb7_r, sizeof(wm1_bb7_e) },
     { 0x0020D574u, wm1_bb8_e, wm1_bb8_r, sizeof(wm1_bb8_e) },
+};
+/* Kept apart: the export build tests the special car id against 6 in about
+ * ten switches (0x4E3DE, 0x4E41E, 0x4E4F1, 0x4E6B5, 0x5083B, 0x5119D,
+ * 0x5139C, 0x58ACB, 0x58ED1, 0x58EE2, 0x113C80, 0x113C91) where the JPN
+ * build tests 12; 12 alone falls to their default case. */
+static const ChihiroBytePatch wm1_blackbird_special[] = {
     { 0x000D9EA1u, wm1_spc_e, wm1_spc_r, sizeof(wm1_spc_e) },
 };
 
@@ -2934,8 +2941,13 @@ static void chihiro_patch_wm1(void)
                         2, wm1_blackbird_rival,
                         ARRAY_SIZE(wm1_blackbird_rival),
                         "WM1 BLACKBIRD RIVAL",
-                        "Blackbird races the 964 (rival keys 6-8 and the "
-                        "special car id, car 6 -> 12)");
+                        "Blackbird races the 964 (rival keys 6-8, car 6 -> "
+                        "12)");
+    chihiro_patch_group("XEMU_WM1_BLACKBIRD_SPECIAL", "V307.xbe",
+                        WM1_REGION_VA, 2, wm1_blackbird_special,
+                        ARRAY_SIZE(wm1_blackbird_special),
+                        "WM1 BLACKBIRD SPECIAL",
+                        "special car Blackbird is car 12 (000D9EB5)");
 }
 
 /* Maximum Tune 2 special car time attack: the car ids of the three special
